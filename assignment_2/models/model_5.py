@@ -94,7 +94,7 @@ class CaptionGenerator(BaseCaptionGenerator):
 
         self.decoder_layer = nn.TransformerEncoderLayer(
             d_model=self.embedding_dim,
-            nhead=3,
+            nhead=4,
             dim_feedforward=hidden_dim,
             dropout=0.1)
 
@@ -116,6 +116,8 @@ class CaptionGenerator(BaseCaptionGenerator):
         if encoded_image is not None and caption_indices is not None:
             caption_indices = caption_indices[:, 1:]  # the encoded image will be used instead of the <SOS> token
 
+        embeddings = self._get_embeddings(encoded_image=encoded_image, caption_indices=caption_indices)
+
 ################################################################################################################################################
 
         #1. pre-fed vectors encoded-image
@@ -123,11 +125,16 @@ class CaptionGenerator(BaseCaptionGenerator):
         #3. positional embeddings instead of RNN
         #4. global self-attention /causal        
         # change dimension of caption_indices invers
-        print("[CAPTION_INDICES]",caption_indices.shape)
-        print("[ENCODED IMAGE]",encoded_image.shape) 
-        # captions [batch_size, sequence_length,]
-        # encoded image [batch_size, encode_size, image_feature_size]
-        output = self.encoder(caption_indices,encoded_image)
+        
+        # print("[CAPTION_INDICES]",caption_indices.shape)
+
+        # print("[ENCODED IMAGE]",encoded_image.shape)
+        # print("[EMBEDDINGS]",embeddings.shape) 
+        # [CAPTION_INDICES] torch.Size([256, 27])
+        # [ENCODED IMAGE] torch.Size([256, 128])
+        
+        # RuntimeError: The shape of the 2D attn_mask is torch.Size([256, 128]), but should be (256, 256).
+        output = self.encoder(embeddings,encoded_image)
 ################################################################################################################################################
 
         logits = self.to_logits(output)
@@ -135,6 +142,16 @@ class CaptionGenerator(BaseCaptionGenerator):
         logits = rearrange(logits, 'batch sequence_length vocabulary_size -> batch vocabulary_size sequence_length')
 
         return {'logits': logits, 'indices': logits.argmax(dim=-2), 'hidden_state': hidden_state}
+
+    def _get_embeddings(self, encoded_image=None, caption_indices=None):
+        if caption_indices is None:
+            embeddings = rearrange(encoded_image, 'batch embedding_dim -> batch 1 embedding_dim')
+        else:
+            embeddings = self.embedding(caption_indices)
+            if encoded_image is not None:
+                embeddings, _ = pack([encoded_image, embeddings], 'batch * embedding_dim')
+
+        return embeddings
 
     def generate_caption_indices(self, encoded_image, sos_token_index, eos_token_index, max_length):
        
