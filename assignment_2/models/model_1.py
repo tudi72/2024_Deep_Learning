@@ -19,7 +19,6 @@ class Model(BaseModel):
                                                   hidden_dim=self.embedding_dim,
                                                   num_layers=self.num_layers)
 
-
 class ImageEncoder(BaseImageEncoder):
     def __init__(self, embedding_dim):
         super().__init__()

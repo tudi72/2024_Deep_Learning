@@ -32,12 +32,13 @@ class ImageEncoder(BaseImageEncoder):
 
         self.embedding_dim = self.dino.embed_dim
 
+        self.freeze()
+        
         self.fc = nn.Sequential(
             nn.Linear(self.dino.embed_dim, embedding_dim),
             nn.ReLU()
         )
 
-        self.freeze()
 
     def freeze(self):
         for param in self.dino.parameters():
@@ -76,66 +77,6 @@ class PositionalEncoding(nn.Module):
         x = x + self.pe[:x.size(0)]
         return self.dropout(x)
 
-class Decoder(nn.Module):
-    """
-    layer:          an instance of the EecoderLayer() class
-    vocab_size:     the number of vocabulary
-    d_model:        size of features in the transformer inputs
-    num_layers:     the number of decoder-layers
-    max_len:        maximum len pf target captions
-    dropout:        dropout value
-    pad_id:         padding token id
-    """
-    def __init__(self,
-                 layer: DecoderLayer,
-                 vocab_size: int,
-                 d_model: int,
-                 num_layers: int,
-                 max_len: int,
-                 dropout: float,
-                 pad_id: int):
-        super().__init__()
-
-        self.pad_id = pad_id
-
-        self.cptn_emb = nn.Embedding(vocab_size, d_model, padding_idx=pad_id)
-        self.pos_emb = PositionalEncoding(d_model, max_len)
-
-        self.layers = nn.ModuleList([deepcopy(layer) for _ in range(num_layers)])
-
-        self.dropout = nn.Dropout(p=dropout)
-
-    def get_attn_subsequent_mask(self, sz: int) -> Tensor:
-        return torch.triu(torch.ones(sz, sz) * float('-inf'), diagonal=1)
-
-    def forward(self, tgt_cptn: Tensor,
-                src_img: Tensor) -> Tuple[Tensor, Tensor]:
-        """
-        tgt_cptn:   [batch_size, max_len-1]
-        src_img:    [encode_size^2, batch_size, image_embed_dim]
-        output:     [max_len, batch_size, model_embed_dim]
-        attn_all:   [layer_num, batch_size, head_num, max_len-1,encode_size^2]
-        """
-        # create masks, then pass to decoder
-        tgt_pad_mask = (tgt_cptn == self.pad_id)
-        tgt_mask = self.get_attn_subsequent_mask(tgt_cptn.size()[1])
-        tgt_mask = tgt_mask.to(tgt_cptn.device)
-
-        # encode captions + pos enc
-        # (B, max_len) -> (B, max_len, d_model) -> (max_len, B, d_model)
-        tgt_cptn = self.cptn_emb(tgt_cptn)  # type: Tensor
-        tgt_cptn = self.dropout(self.pos_emb(tgt_cptn.permute(1, 0, 2)))
-
-        attns_all = []
-        for layer in self.layers:
-            tgt_cptn, attns = layer(tgt_cptn, src_img, tgt_mask, tgt_pad_mask)
-            attns_all.append(attns)
-        # [layer_num, batch_size, head_num, max_len, encode_size**2]
-        attns_all = torch.stack(attns_all)
-
-        return tgt_cptn, attns_all
-
-
 class CaptionGenerator(BaseCaptionGenerator):
     def __init__(self, vocabulary_size, embedding_dim, hidden_dim, num_layers):
         super().__init__(vocabulary_size=vocabulary_size)
@@ -151,28 +92,17 @@ class CaptionGenerator(BaseCaptionGenerator):
 
         self.to_logits = torch.nn.Linear(in_features=self.embedding_dim, out_features=self.vocabulary_size)
 
-        self.transformer_decoder = TransformerModel(
-            ntoken=vocabulary_size,
+        self.decoder_layer = nn.TransformerEncoderLayer(
             d_model=self.embedding_dim,
-            nhead =2,
-            d_hid = self.hidden_dim,
-            nlayers= self.num_layers,
-            )
-        
+            nhead=3,
+            dim_feedforward=hidden_dim,
+            dropout=0.1)
+
+        self.encoder = nn.TransformerEncoder(self.decoder_layer, num_layers=self.num_layers)
         self.image_projection = nn.Linear(self.embedding_dim,self.embedding_dim)
 
     def freeze(self):
         pass
-
-    def _get_embeddings(self, encoded_image=None, caption_indices=None):
-        if caption_indices is None:
-            embeddings = rearrange(encoded_image, 'batch embedding_dim -> batch 1 embedding_dim')
-        else:
-            embeddings = self.embedding(caption_indices)
-            if encoded_image is not None:
-                embeddings, _ = pack([encoded_image, embeddings], 'batch * embedding_dim')
-
-        return embeddings
 
     def forward(self, encoded_image, caption_indices, hidden_state=None):
         """Forward method.
@@ -191,19 +121,18 @@ class CaptionGenerator(BaseCaptionGenerator):
         #1. pre-fed vectors encoded-image
         #2. embeddings using tokenization like BERT
         #3. positional embeddings instead of RNN
-        #4. global self-attention /causal         
-        batch_size,seq_len = caption_indices.size()
-
-        encoded_image = self.image_projection(encoded_image).unsqueeze(0)
-
-        caption_indices = caption_indices.transpose(0, 1)
-        # self-attention layer
-        tgt_mask = nn.Transformer.generate_square_subsequent_mask(seq_len).to(caption_indices.device)
-
-    
-        logits = self.transformer_decoder(encoded_image, src_mask=tgt_mask)
-        
+        #4. global self-attention /causal        
+        # change dimension of caption_indices invers
+        print("[CAPTION_INDICES]",caption_indices.shape)
+        print("[ENCODED IMAGE]",encoded_image.shape) 
+        # captions [batch_size, sequence_length,]
+        # encoded image [batch_size, encode_size, image_feature_size]
+        output = self.encoder(caption_indices,encoded_image)
 ################################################################################################################################################
+
+        logits = self.to_logits(output)
+
+        logits = rearrange(logits, 'batch sequence_length vocabulary_size -> batch vocabulary_size sequence_length')
 
         return {'logits': logits, 'indices': logits.argmax(dim=-2), 'hidden_state': hidden_state}
 
